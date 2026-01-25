@@ -176,6 +176,31 @@ export class SimpleIMAPService {
     }
   }
 
+  private invalidateFolderCaches(folder: string): void {
+    if (!this.isCacheEnabled()) {
+      return;
+    }
+    this.folderCache = null;
+    this.mailboxStatusCache.delete(folder);
+    for (const key of this.emailsCache.keys()) {
+      if (key.startsWith(`${folder}:`)) {
+        this.emailsCache.delete(key);
+      }
+    }
+    for (const key of this.emailByIdCache.keys()) {
+      if (key.startsWith(`${folder}:`)) {
+        this.emailByIdCache.delete(key);
+      }
+    }
+  }
+
+  private invalidateEmailCache(folder: string, emailId: number): void {
+    if (!this.isCacheEnabled()) {
+      return;
+    }
+    this.emailByIdCache.delete(`${folder}:${emailId}`);
+  }
+
   async listFolders(): Promise<FolderSummary[]> {
     if (this.isCacheEnabled() && this.folderCache) {
       return this.folderCache;
@@ -457,20 +482,24 @@ export class SimpleIMAPService {
   async setEmailRead(folder: string, emailId: number, isRead: boolean): Promise<boolean> {
     return this.withMailbox(folder, async () => {
       const client = await this.getClient();
-      if (isRead) {
-        return client.messageFlagsAdd(emailId, ["\\Seen"], { uid: true });
-      }
-      return client.messageFlagsRemove(emailId, ["\\Seen"], { uid: true });
+      const result = isRead
+        ? await client.messageFlagsAdd(emailId, ["\\Seen"], { uid: true })
+        : await client.messageFlagsRemove(emailId, ["\\Seen"], { uid: true });
+      this.invalidateFolderCaches(folder);
+      this.invalidateEmailCache(folder, emailId);
+      return result;
     });
   }
 
   async setEmailStarred(folder: string, emailId: number, isStarred: boolean): Promise<boolean> {
     return this.withMailbox(folder, async () => {
       const client = await this.getClient();
-      if (isStarred) {
-        return client.messageFlagsAdd(emailId, ["\\Flagged"], { uid: true });
-      }
-      return client.messageFlagsRemove(emailId, ["\\Flagged"], { uid: true });
+      const result = isStarred
+        ? await client.messageFlagsAdd(emailId, ["\\Flagged"], { uid: true })
+        : await client.messageFlagsRemove(emailId, ["\\Flagged"], { uid: true });
+      this.invalidateFolderCaches(folder);
+      this.invalidateEmailCache(folder, emailId);
+      return result;
     });
   }
 
@@ -478,6 +507,9 @@ export class SimpleIMAPService {
     return this.withMailbox(folder, async () => {
       const client = await this.getClient();
       const result = await client.messageMove(emailId, targetFolder, { uid: true });
+      this.invalidateFolderCaches(folder);
+      this.invalidateFolderCaches(targetFolder);
+      this.invalidateEmailCache(folder, emailId);
       return Boolean(result);
     });
   }
@@ -515,6 +547,9 @@ export class SimpleIMAPService {
         return true;
       }
       const result = await client.messageMove(emailId, trashFolder, { uid: true });
+      this.invalidateFolderCaches(folder);
+      this.invalidateFolderCaches(trashFolder);
+      this.invalidateEmailCache(folder, emailId);
       return Boolean(result);
     });
   }

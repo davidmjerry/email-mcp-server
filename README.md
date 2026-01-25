@@ -2,7 +2,7 @@
 
 A Node.js MCP (Model Context Protocol) server for sending and reading email via SMTP and IMAP. The underlying SMTP/IMAP clients are standards-based and can be pointed at any provider by changing environment variables.
 
-> Originally based on anyrxo/email-mcp-server (MIT). Heavily modified and extended.
+> Originally based on anyrxo/protonmail-pro-mcp (MIT). Heavily modified and extended.
 
 > **Disclaimer:** Not affiliated with Proton.
 

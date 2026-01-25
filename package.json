@@ -1,0 +1,72 @@
+{
+  "name": "@davidmjerry/email-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for SMTP/IMAP email automation with analytics and mailbox management tools.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "email-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/index.js",
+    "test": "node test.js",
+    "prepare": "npm run build",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "protonmail",
+    "mcp",
+    "sse",
+    "email",
+    "automation",
+    "typescript",
+    "claude",
+    "ai",
+    "productivity",
+    "bridge",
+    "smtp",
+    "imap",
+    "analytics",
+    "professional"
+  ],
+  "author": "davidmjerry",
+  "license": "MIT",
+  "homepage": "https://github.com/anyrxo/email-mcp-server#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anyrxo/email-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/anyrxo/email-mcp-server/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.7.1",
+    "nodemailer": "^7.0.12"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.10.2",
+    "@types/nodemailer": "^6.4.19",
+    "typescript": "^5.7.2"
+  },
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "FINAL-VALIDATION.md",
+    "package.json"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

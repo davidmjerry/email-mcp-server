@@ -248,8 +248,11 @@ export class SimpleIMAPService {
     return mapped;
   }
 
-  async getMailboxStatus(folder: string): Promise<MailboxStatusSummary> {
-    if (this.isCacheEnabled() && this.mailboxStatusCache.has(folder)) {
+  async getMailboxStatus(
+    folder: string,
+    { useCache = true }: { useCache?: boolean } = {}
+  ): Promise<MailboxStatusSummary> {
+    if (useCache && this.isCacheEnabled() && this.mailboxStatusCache.has(folder)) {
       return this.mailboxStatusCache.get(folder) as MailboxStatusSummary;
     }
     const client = await this.getClient();
@@ -675,7 +678,7 @@ export class SimpleIMAPService {
         if (!this.isConnected()) {
           await this.reconnect();
         }
-        const status = await this.getMailboxStatus(folder);
+        const status = await this.getMailboxStatus(folder, { useCache: false });
         if (
           !lastStatus ||
           status.totalMessages !== lastStatus.totalMessages ||

@@ -137,7 +137,7 @@ const mapServiceError = (error: unknown): { mcpError?: McpError; retryable: bool
 
   if (isAuthError) {
     return {
-      mcpError: new McpError(ErrorCode.Unauthorized, "Authentication failed while contacting the mail server"),
+      mcpError: new McpError(ErrorCode.InvalidRequest, "Authentication failed while contacting the mail server"),
       retryable: false,
       message,
       code,

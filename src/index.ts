@@ -101,6 +101,86 @@ const getTokenFromRequest = (req: Request): string | undefined => {
   return undefined;
 };
 
+const sleep = (ms: number) => new Promise((resolve) => {
+  setTimeout(resolve, ms);
+});
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+};
+
+const getErrorCode = (error: unknown): string | undefined => {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === "string") {
+      return code;
+    }
+  }
+  return undefined;
+};
+
+const mapServiceError = (error: unknown): { mcpError?: McpError; retryable: boolean; message: string; code?: string } => {
+  const message = getErrorMessage(error);
+  const code = getErrorCode(error);
+  const normalizedMessage = message.toLowerCase();
+  const normalizedCode = code?.toLowerCase();
+  const normalizedCodeToken = normalizedCode?.replace(/\s+/g, "");
+
+  const authCodes = new Set(["eauth", "auth", "authenticationfailed"]);
+  const isAuthError = normalizedMessage.includes("auth")
+    || normalizedMessage.includes("authentication")
+    || normalizedMessage.includes("login")
+    || (normalizedCodeToken ? authCodes.has(normalizedCodeToken) : false);
+
+  if (isAuthError) {
+    return {
+      mcpError: new McpError(ErrorCode.Unauthorized, "Authentication failed while contacting the mail server"),
+      retryable: false,
+      message,
+      code,
+    };
+  }
+
+  if (
+    normalizedMessage.includes("not found")
+    || normalizedMessage.includes("mailbox")
+    || normalizedMessage.includes("folder")
+    || normalizedMessage.includes("trash folder")
+  ) {
+    return {
+      mcpError: new McpError(ErrorCode.InvalidParams, message),
+      retryable: false,
+      message,
+      code,
+    };
+  }
+
+  const transientCodes = new Set([
+    "etimedout",
+    "econnreset",
+    "econnrefused",
+    "ehostunreach",
+    "enotfound",
+    "eai_again",
+    "enetwork",
+  ]);
+  const isTransient = (normalizedCodeToken && transientCodes.has(normalizedCodeToken))
+    || normalizedMessage.includes("timeout")
+    || normalizedMessage.includes("timed out")
+    || normalizedMessage.includes("temporarily")
+    || normalizedMessage.includes("connection reset")
+    || normalizedMessage.includes("network");
+
+  return {
+    retryable: isTransient,
+    message,
+    code,
+  };
+};
+
 const requireToken = (req: Request, res: Response): boolean => {
   if (!MCP_TOKEN) {
     return true;
@@ -113,6 +193,23 @@ const requireToken = (req: Request, res: Response): boolean => {
 
   logger.warn("Unauthorized MCP request rejected", "MCPServer");
   res.status(401).send("Unauthorized");
+  return false;
+};
+
+const verifySmtpWithRetry = async (maxAttempts: number): Promise<boolean> => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await smtpService.verifyConnection();
+      return true;
+    } catch (error) {
+      logger.warn(`SMTP verification attempt ${attempt} failed`, "MCPServer", error);
+      if (attempt < maxAttempts) {
+        const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
+        const jitter = 0.5 + Math.random();
+        await sleep(Math.round(backoffMs * jitter));
+      }
+    }
+  }
   return false;
 };
 
@@ -622,6 +719,13 @@ const createServer = () => {
             logger.warn("SMTP connection check failed", "MCPServer", error);
             smtpOk = false;
           }
+          let imapOk = true;
+          try {
+            imapOk = await imapService.checkConnection("INBOX");
+          } catch (error) {
+            logger.warn("IMAP connection check failed", "MCPServer", error);
+            imapOk = false;
+          }
 
           return {
             content: [
@@ -629,7 +733,7 @@ const createServer = () => {
                 type: "text",
                 text: JSON.stringify({
                   smtp: smtpOk,
-                  imap: imapService.isConnected(),
+                  imap: imapOk,
                 }),
               },
             ],
@@ -952,15 +1056,19 @@ const createServer = () => {
           return notImplemented(toolName);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const { mcpError, retryable, message, code } = mapServiceError(error);
       logger.debug("Tool execution failed", "MCPServer", {
         tool: toolName,
         arguments: args,
         message,
+        code,
       });
 
       if (error instanceof McpError) {
         throw error;
+      }
+      if (mcpError) {
+        throw mcpError;
       }
 
       return {
@@ -968,7 +1076,13 @@ const createServer = () => {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ status: "error", tool: toolName, message }),
+            text: JSON.stringify({
+              status: "error",
+              tool: toolName,
+              message,
+              retryable,
+              code,
+            }),
           },
         ],
       };
@@ -987,8 +1101,13 @@ async function main() {
   try {
     // Verify SMTP connection
     logger.info("🔗 Verifying SMTP connection...", "MCPServer");
-    await smtpService.verifyConnection();
-    logger.info("✅ SMTP connection verified", "MCPServer");
+    const smtpReady = await verifySmtpWithRetry(3);
+    if (smtpReady) {
+      logger.info("✅ SMTP connection verified", "MCPServer");
+    } else {
+      logger.warn("⚠️ SMTP verification failed - email sending features will be limited", "MCPServer");
+      logger.info("💡 Verify your SMTP host/port credentials and connectivity", "MCPServer");
+    }
 
     // Try to connect to IMAP
     logger.info("🔗 Connecting to IMAP...", "MCPServer");

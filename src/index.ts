@@ -138,7 +138,7 @@ const config: MailConfig = {
   cacheEnabled: true,
   analyticsEnabled: true,
   autoSync: true,
-  syncInterval: 5 // minutes
+  syncIntervalSeconds: 15,
 };
 
 // Initialize services
@@ -803,6 +803,7 @@ const createServer = () => {
               await imapService.setEmailRead(folder, emailId, isRead);
             })
           );
+          imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
@@ -821,6 +822,7 @@ const createServer = () => {
               await imapService.setEmailStarred(folder, emailId, isStarred);
             })
           );
+          imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
@@ -839,6 +841,8 @@ const createServer = () => {
               await imapService.moveEmail(folder, emailId, targetFolder);
             })
           );
+          imapService.invalidateFolderCache(folder);
+          imapService.invalidateFolderCache(targetFolder);
           return {
             content: [
               {
@@ -856,6 +860,7 @@ const createServer = () => {
               await imapService.deleteEmail(folder, emailId);
             })
           );
+          imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
@@ -996,12 +1001,11 @@ async function main() {
     }
 
     if (config.autoSync) {
-      const intervalMs = Math.max(1, config.syncInterval) * 60_000;
+      const intervalMs = Math.max(1, config.syncIntervalSeconds) * 1000;
       imapService.startRealtimeSync("INBOX", intervalMs, (status) => {
-        imapService.clearCache();
         logger.info("📡 Realtime sync update detected", "MCPServer", status);
       });
-      logger.info(`🕒 Realtime sync polling enabled for INBOX every ${config.syncInterval} minutes`, "MCPServer");
+      logger.info(`🕒 Realtime sync polling enabled for INBOX every ${config.syncIntervalSeconds} seconds`, "MCPServer");
     }
 
     const app = createMcpExpressApp({

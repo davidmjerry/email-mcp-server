@@ -57,6 +57,7 @@ export class SimpleIMAPService {
   private emailsCache = new Map<string, { folder: string; total: number; emails: EmailSummary[] }>();
   private emailByIdCache = new Map<string, EmailDetail | null>();
   private realtimeSyncTimers = new Map<string, NodeJS.Timeout>();
+  private realtimeSyncInFlight = new Set<string>();
 
   constructor(config?: MailConfig) {
     if (config) {
@@ -253,11 +254,11 @@ export class SimpleIMAPService {
     return summary;
   }
 
-  async getEmails(folder: string, limit: number, offset: number): Promise<{ folder: string; total: number; emails: EmailSummary[] }> {
-    const cacheKey = `${folder}:${limit}:${offset}`;
-    if (this.isCacheEnabled() && this.emailsCache.has(cacheKey)) {
-      return this.emailsCache.get(cacheKey) as { folder: string; total: number; emails: EmailSummary[] };
-    }
+  private async fetchEmailsFromServer(
+    folder: string,
+    limit: number,
+    offset: number,
+  ): Promise<{ folder: string; total: number; emails: EmailSummary[] }> {
     return this.withMailbox(folder, async () => {
       const client = await this.getClient();
       const mailbox = client.mailbox;
@@ -303,11 +304,24 @@ export class SimpleIMAPService {
       });
 
       const result = { folder, total, emails };
-      if (this.isCacheEnabled()) {
-        this.emailsCache.set(cacheKey, result);
-      }
       return result;
     });
+  }
+
+  async getEmails(folder: string, limit: number, offset: number): Promise<{ folder: string; total: number; emails: EmailSummary[] }> {
+    const cacheKey = `${folder}:${limit}:${offset}`;
+    if (this.isCacheEnabled() && this.emailsCache.has(cacheKey)) {
+      return this.emailsCache.get(cacheKey) as { folder: string; total: number; emails: EmailSummary[] };
+    }
+    const result = await this.fetchEmailsFromServer(folder, limit, offset);
+    if (this.isCacheEnabled()) {
+      this.emailsCache.set(cacheKey, result);
+    }
+    return result;
+  }
+
+  invalidateFolderCache(folder: string): void {
+    this.invalidateFolderCaches(folder);
   }
 
   async getEmailById(folder: string, emailId: number): Promise<EmailDetail | null> {
@@ -627,14 +641,17 @@ export class SimpleIMAPService {
   startRealtimeSync(
     folder: string,
     intervalMs: number,
-    onUpdate: (status: MailboxStatusSummary) => void,
+    onUpdate?: (status: MailboxStatusSummary) => void,
   ): void {
     if (this.realtimeSyncTimers.has(folder)) {
       return;
     }
     let lastStatus: MailboxStatusSummary | null = null;
-    const timer = setInterval(async () => {
+    const poll = async () => {
       try {
+        if (!this.isConnected()) {
+          await this.reconnect();
+        }
         const status = await this.getMailboxStatus(folder);
         if (
           !lastStatus ||
@@ -642,11 +659,16 @@ export class SimpleIMAPService {
           status.unseenMessages !== lastStatus.unseenMessages
         ) {
           lastStatus = status;
-          onUpdate(status);
+          onUpdate?.(status);
+          void this.syncFolderCaches(folder);
         }
       } catch (error) {
         logger.warn("Realtime sync polling failed", "SimpleIMAPService", error);
       }
+    };
+    void poll();
+    const timer = setInterval(() => {
+      void poll();
     }, intervalMs);
     this.realtimeSyncTimers.set(folder, timer);
   }
@@ -656,6 +678,57 @@ export class SimpleIMAPService {
     if (timer) {
       clearInterval(timer);
       this.realtimeSyncTimers.delete(folder);
+    }
+  }
+
+  private async reconnect(): Promise<void> {
+    try {
+      await this.disconnect();
+    } catch (error) {
+      logger.warn("IMAP disconnect failed during reconnect", "SimpleIMAPService", error);
+    }
+    try {
+      await this.connect();
+    } catch (error) {
+      logger.warn("IMAP reconnect attempt failed", "SimpleIMAPService", error);
+    }
+  }
+
+  private async syncFolderCaches(folder: string): Promise<void> {
+    if (!this.isCacheEnabled() || this.realtimeSyncInFlight.has(folder)) {
+      return;
+    }
+    this.realtimeSyncInFlight.add(folder);
+    try {
+      const cachedKeys = Array.from(this.emailsCache.keys()).filter((key) => key.startsWith(`${folder}:`));
+      if (cachedKeys.length === 0) {
+        const seed = await this.fetchEmailsFromServer(folder, 50, 0);
+        this.emailsCache.set(`${folder}:50:0`, seed);
+      } else {
+        await Promise.all(
+          cachedKeys.map(async (key) => {
+            const [, limitRaw, offsetRaw] = key.split(":");
+            const limit = Number(limitRaw);
+            const offset = Number(offsetRaw);
+            if (!Number.isFinite(limit) || !Number.isFinite(offset)) {
+              return;
+            }
+            const refreshed = await this.fetchEmailsFromServer(folder, limit, offset);
+            this.emailsCache.set(key, refreshed);
+          }),
+        );
+      }
+      for (const key of Array.from(this.emailByIdCache.keys())) {
+        if (key.startsWith(`${folder}:`)) {
+          this.emailByIdCache.delete(key);
+        }
+      }
+      this.folderCache = null;
+      this.mailboxStatusCache.delete(folder);
+    } catch (error) {
+      logger.warn("Realtime sync cache refresh failed", "SimpleIMAPService", error);
+    } finally {
+      this.realtimeSyncInFlight.delete(folder);
     }
   }
 }

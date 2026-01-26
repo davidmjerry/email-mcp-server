@@ -58,6 +58,14 @@ export class SimpleIMAPService {
   private emailByIdCache = new Map<string, EmailDetail | null>();
   private realtimeSyncTimers = new Map<string, NodeJS.Timeout>();
   private realtimeSyncInFlight = new Set<string>();
+  private reconnectFailures = 0;
+  private reconnectBackoffUntil = 0;
+  private realtimeSyncFailureCounts = new Map<string, number>();
+  private realtimeSyncPauseUntil = new Map<string, number>();
+  private readonly reconnectBaseDelayMs = 1000;
+  private readonly reconnectMaxDelayMs = 30_000;
+  private readonly realtimeSyncFailureThreshold = 5;
+  private readonly realtimeSyncPauseMs = 60_000;
 
   constructor(config?: MailConfig) {
     if (config) {
@@ -97,6 +105,8 @@ export class SimpleIMAPService {
 
     this.client = new ImapFlow(options);
     await this.client.connect();
+    this.reconnectFailures = 0;
+    this.reconnectBackoffUntil = 0;
     logger.info("✅ IMAP connection established", "SimpleIMAPService");
   }
 
@@ -113,6 +123,15 @@ export class SimpleIMAPService {
 
   isConnected(): boolean {
     return Boolean(this.client?.authenticated);
+  }
+
+  async checkConnection(folder = "INBOX"): Promise<boolean> {
+    try {
+      await this.getMailboxStatus(folder);
+      return true;
+    } catch (error) {
+      return false;
+    }
   }
 
   private async getClient(): Promise<ImapFlow> {
@@ -649,6 +668,10 @@ export class SimpleIMAPService {
     let lastStatus: MailboxStatusSummary | null = null;
     const poll = async () => {
       try {
+        const pausedUntil = this.realtimeSyncPauseUntil.get(folder);
+        if (pausedUntil && Date.now() < pausedUntil) {
+          return;
+        }
         if (!this.isConnected()) {
           await this.reconnect();
         }
@@ -662,8 +685,20 @@ export class SimpleIMAPService {
           onUpdate?.(status);
           void this.syncFolderCaches(folder);
         }
+        this.realtimeSyncFailureCounts.set(folder, 0);
+        this.realtimeSyncPauseUntil.delete(folder);
       } catch (error) {
         logger.warn("Realtime sync polling failed", "SimpleIMAPService", error);
+        const failures = (this.realtimeSyncFailureCounts.get(folder) ?? 0) + 1;
+        this.realtimeSyncFailureCounts.set(folder, failures);
+        if (failures >= this.realtimeSyncFailureThreshold) {
+          const pauseUntil = Date.now() + this.realtimeSyncPauseMs;
+          this.realtimeSyncPauseUntil.set(folder, pauseUntil);
+          logger.warn(
+            `Realtime sync paused for ${folder} after ${failures} failures; retrying in ${Math.round(this.realtimeSyncPauseMs / 1000)}s`,
+            "SimpleIMAPService"
+          );
+        }
       }
     };
     void poll();
@@ -679,9 +714,14 @@ export class SimpleIMAPService {
       clearInterval(timer);
       this.realtimeSyncTimers.delete(folder);
     }
+    this.realtimeSyncFailureCounts.delete(folder);
+    this.realtimeSyncPauseUntil.delete(folder);
   }
 
   private async reconnect(): Promise<void> {
+    if (this.reconnectBackoffUntil && Date.now() < this.reconnectBackoffUntil) {
+      return;
+    }
     try {
       await this.disconnect();
     } catch (error) {
@@ -691,6 +731,13 @@ export class SimpleIMAPService {
       await this.connect();
     } catch (error) {
       logger.warn("IMAP reconnect attempt failed", "SimpleIMAPService", error);
+      this.reconnectFailures += 1;
+      const baseDelay = Math.min(
+        this.reconnectBaseDelayMs * Math.pow(2, this.reconnectFailures - 1),
+        this.reconnectMaxDelayMs
+      );
+      const jitter = 0.5 + Math.random();
+      this.reconnectBackoffUntil = Date.now() + Math.round(baseDelay * jitter);
     }
   }
 

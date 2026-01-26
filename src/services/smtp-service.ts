@@ -121,6 +121,8 @@ export class SMTPService {
     const timeout = setTimeout(async () => {
       try {
         await this.sendEmail(options);
+      } catch (error) {
+        logger.error("❌ Scheduled email send failed", "SMTPService", { jobId, error });
       } finally {
         this.scheduledJobs.delete(jobId);
       }

@@ -191,7 +191,10 @@ const requireToken = (req: Request, res: Response): boolean => {
     return true;
   }
 
-  logger.warn("Unauthorized MCP request rejected", "MCPServer");
+  logger.warn("Unauthorized MCP request rejected", "MCPServer", {
+    path: req.path,
+    ip: req.ip,
+  });
   res.status(401).send("Unauthorized");
   return false;
 };
@@ -1139,14 +1142,22 @@ async function main() {
         return;
       }
 
-      logger.info("📡 SSE client connected", "MCPServer");
+      logger.info("📡 SSE client connected", "MCPServer", {
+        ip: req.ip,
+        userAgent: req.get("user-agent"),
+      });
       try {
         const transport = new SSEServerTransport("/messages", res);
         transports.set(transport.sessionId, transport);
+        logger.debug("✅ SSE session established", "MCPServer", {
+          sessionId: transport.sessionId,
+        });
 
         transport.onclose = () => {
           transports.delete(transport.sessionId);
-          logger.info(`📴 SSE session closed: ${transport.sessionId}`, "MCPServer");
+          logger.info("📴 SSE session closed", "MCPServer", {
+            sessionId: transport.sessionId,
+          });
         };
 
         const server = createServer();
@@ -1173,11 +1184,27 @@ async function main() {
 
       const transport = transports.get(sessionId);
       if (!transport) {
+        logger.warn("Received MCP message for unknown session", "MCPServer", {
+          sessionId,
+          ip: req.ip,
+        });
         res.status(404).send("Unknown sessionId");
         return;
       }
 
-      await transport.handlePostMessage(req, res, req.body);
+      logger.debug("📨 MCP message received", "MCPServer", {
+        sessionId,
+        contentLength: req.get("content-length"),
+      });
+      try {
+        await transport.handlePostMessage(req, res, req.body);
+      } catch (error) {
+        logger.error("❌ Failed to handle MCP message", "MCPServer", {
+          sessionId,
+          error,
+        });
+        res.status(500).send("Failed to handle MCP message");
+      }
     });
 
     const httpServer = app.listen(MCP_PORT, MCP_HOST, () => {

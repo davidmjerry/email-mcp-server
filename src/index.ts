@@ -105,6 +105,23 @@ const sleep = (ms: number) => new Promise((resolve) => {
   setTimeout(resolve, ms);
 });
 
+const withTimeout = async <T>(label: string, work: Promise<T>, timeoutMs: number): Promise<T> => {
+  let timeoutId: NodeJS.Timeout | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([work, timeout]);
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+  }
+};
+
 const getErrorMessage = (error: unknown): string => {
   if (error instanceof Error) {
     return error.message;
@@ -1207,9 +1224,17 @@ async function main() {
       }
     });
 
+    const activeSockets = new Set<import("net").Socket>();
     const httpServer = app.listen(MCP_PORT, MCP_HOST, () => {
       logger.info(`🚀 MCP SSE server listening on http://${MCP_HOST}:${MCP_PORT}`, "MCPServer");
       logger.info("🌟 Connect via /sse and POST messages to /messages", "MCPServer");
+    });
+
+    httpServer.on("connection", (socket) => {
+      activeSockets.add(socket);
+      socket.on("close", () => {
+        activeSockets.delete(socket);
+      });
     });
 
     httpServer.on("error", (error) => {
@@ -1219,17 +1244,45 @@ async function main() {
 
     const shutdown = async () => {
       logger.info("📡 Received shutdown signal, closing server...", "MCPServer");
-      for (const transport of transports.values()) {
-        await transport.close();
+      const shutdownTimeoutMs = 10_000;
+      const closeTransports = Promise.all(
+        Array.from(transports.values()).map((transport) => transport.close()),
+      );
+      try {
+        await withTimeout("Transport shutdown", closeTransports, shutdownTimeoutMs);
+      } catch (error) {
+        logger.warn("⚠️ Transport shutdown timed out", "MCPServer", error);
       }
       transports.clear();
       imapService.stopRealtimeSync("INBOX");
-      await imapService.disconnect();
-      await smtpService.close();
-      httpServer.close(() => {
-        logger.info("👋 Server shutdown complete", "MCPServer");
-        process.exit(0);
+      try {
+        await withTimeout("IMAP disconnect", imapService.disconnect(), shutdownTimeoutMs);
+      } catch (error) {
+        logger.warn("⚠️ IMAP disconnect timed out", "MCPServer", error);
+      }
+      try {
+        await withTimeout("SMTP shutdown", smtpService.close(), shutdownTimeoutMs);
+      } catch (error) {
+        logger.warn("⚠️ SMTP shutdown timed out", "MCPServer", error);
+      }
+
+      const closeServer = new Promise<void>((resolve) => {
+        httpServer.close(() => {
+          resolve();
+        });
       });
+
+      try {
+        await withTimeout("HTTP server shutdown", closeServer, shutdownTimeoutMs);
+      } catch (error) {
+        logger.warn("⚠️ HTTP server shutdown timed out; destroying sockets", "MCPServer", error);
+        for (const socket of activeSockets) {
+          socket.destroy();
+        }
+      }
+
+      logger.info("👋 Server shutdown complete", "MCPServer");
+      process.exit(0);
     };
 
     process.on("SIGINT", shutdown);

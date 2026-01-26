@@ -23,7 +23,7 @@ export interface MailConfig {
   cacheEnabled: boolean;
   analyticsEnabled: boolean;
   autoSync: boolean;
-  syncInterval: number;
+  syncIntervalSeconds: number;
 }
 
 export interface LogEntry {

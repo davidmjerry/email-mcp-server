@@ -118,14 +118,15 @@ export class SMTPService {
     const delayMs = Math.max(0, scheduleAt.getTime() - Date.now());
     const jobId = `job_${Math.random().toString(36).slice(2, 10)}`;
 
-    const timeout = setTimeout(async () => {
-      try {
-        await this.sendEmail(options);
-      } catch (error) {
-        logger.error("❌ Scheduled email send failed", "SMTPService", { jobId, error });
-      } finally {
-        this.scheduledJobs.delete(jobId);
-      }
+    // Use non-async callback to avoid unhandled promise rejections from setTimeout
+    const timeout = setTimeout(() => {
+      this.sendEmail(options)
+        .catch((error) => {
+          logger.error("❌ Scheduled email send failed", "SMTPService", { jobId, error });
+        })
+        .finally(() => {
+          this.scheduledJobs.delete(jobId);
+        });
     }, delayMs);
 
     this.scheduledJobs.set(jobId, timeout);

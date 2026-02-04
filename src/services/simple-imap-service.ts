@@ -686,7 +686,9 @@ export class SimpleIMAPService {
         ) {
           lastStatus = status;
           onUpdate?.(status);
-          void this.syncFolderCaches(folder);
+          this.syncFolderCaches(folder).catch((error) => {
+            logger.error("Background folder cache sync failed", "SimpleIMAPService", error);
+          });
         }
         this.realtimeSyncFailureCounts.set(folder, 0);
         this.realtimeSyncPauseUntil.delete(folder);
@@ -704,9 +706,13 @@ export class SimpleIMAPService {
         }
       }
     };
-    void poll();
+    poll().catch((error) => {
+      logger.error("Initial realtime sync poll failed", "SimpleIMAPService", error);
+    });
     const timer = setInterval(() => {
-      void poll();
+      poll().catch((error) => {
+        logger.error("Scheduled realtime sync poll failed", "SimpleIMAPService", error);
+      });
     }, intervalMs);
     this.realtimeSyncTimers.set(folder, timer);
   }
@@ -755,7 +761,7 @@ export class SimpleIMAPService {
         const seed = await this.fetchEmailsFromServer(folder, 50, 0);
         this.emailsCache.set(`${folder}:50:0`, seed);
       } else {
-        await Promise.all(
+        const results = await Promise.allSettled(
           cachedKeys.map(async (key) => {
             const [, limitRaw, offsetRaw] = key.split(":");
             const limit = Number(limitRaw);
@@ -767,6 +773,14 @@ export class SimpleIMAPService {
             this.emailsCache.set(key, refreshed);
           }),
         );
+        const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+        if (failures.length > 0) {
+          logger.warn(
+            `Cache sync: ${failures.length}/${cachedKeys.length} cache refreshes failed`,
+            "SimpleIMAPService",
+            { folder, errors: failures.map((f) => f.reason?.message ?? String(f.reason)) }
+          );
+        }
       }
       for (const key of Array.from(this.emailByIdCache.keys())) {
         if (key.startsWith(`${folder}:`)) {

@@ -922,17 +922,26 @@ const createServer = () => {
           assertNoUnknownKeys(args, ["folder", "emailIds", "isRead"], "mark_email_read");
           const emailIds = parseEmailIds(args, "mark_email_read");
           const isRead = optionalBoolean(args, "isRead", "mark_email_read") ?? true;
-          await Promise.all(
+          const results = await Promise.allSettled(
             emailIds.map(async (emailId) => {
               await imapService.setEmailRead(folder, emailId, isRead);
+              return emailId;
             })
           );
+          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
+          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+          if (failed.length > 0) {
+            logger.warn(`mark_email_read: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
+              folder,
+              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
+            });
+          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds, isRead }),
+                text: JSON.stringify({ emailIds: succeeded, isRead, failedCount: failed.length }),
               },
             ],
           };
@@ -941,17 +950,26 @@ const createServer = () => {
           assertNoUnknownKeys(args, ["folder", "emailIds", "isStarred"], "star_email");
           const emailIds = parseEmailIds(args, "star_email");
           const isStarred = optionalBoolean(args, "isStarred", "star_email") ?? true;
-          await Promise.all(
+          const results = await Promise.allSettled(
             emailIds.map(async (emailId) => {
               await imapService.setEmailStarred(folder, emailId, isStarred);
+              return emailId;
             })
           );
+          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
+          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+          if (failed.length > 0) {
+            logger.warn(`star_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
+              folder,
+              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
+            });
+          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds, isStarred }),
+                text: JSON.stringify({ emailIds: succeeded, isStarred, failedCount: failed.length }),
               },
             ],
           };
@@ -960,18 +978,28 @@ const createServer = () => {
           assertNoUnknownKeys(args, ["folder", "emailIds", "targetFolder"], "move_email");
           const targetFolder = requireString(args, "targetFolder", "move_email");
           const emailIds = parseEmailIds(args, "move_email");
-          await Promise.all(
+          const results = await Promise.allSettled(
             emailIds.map(async (emailId) => {
               await imapService.moveEmail(folder, emailId, targetFolder);
+              return emailId;
             })
           );
+          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
+          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+          if (failed.length > 0) {
+            logger.warn(`move_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
+              folder,
+              targetFolder,
+              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
+            });
+          }
           imapService.invalidateFolderCache(folder);
           imapService.invalidateFolderCache(targetFolder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds, targetFolder }),
+                text: JSON.stringify({ emailIds: succeeded, targetFolder, failedCount: failed.length }),
               },
             ],
           };
@@ -979,17 +1007,26 @@ const createServer = () => {
         case "delete_email": {
           assertNoUnknownKeys(args, ["folder", "emailIds"], "delete_email");
           const emailIds = parseEmailIds(args, "delete_email");
-          await Promise.all(
+          const results = await Promise.allSettled(
             emailIds.map(async (emailId) => {
               await imapService.deleteEmail(folder, emailId);
+              return emailId;
             })
           );
+          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
+          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+          if (failed.length > 0) {
+            logger.warn(`delete_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
+              folder,
+              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
+            });
+          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds, deleted: true }),
+                text: JSON.stringify({ emailIds: succeeded, deleted: true, failedCount: failed.length }),
               },
             ],
           };
@@ -1091,21 +1128,12 @@ const createServer = () => {
         throw mcpError;
       }
 
-      return {
-        isError: true,
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              status: "error",
-              tool: toolName,
-              message,
-              retryable,
-              code,
-            }),
-          },
-        ],
-      };
+      // Throw a proper MCP error instead of returning an error response object
+      // This ensures the MCP protocol correctly signals the error to clients
+      throw new McpError(
+        retryable ? ErrorCode.InternalError : ErrorCode.InvalidRequest,
+        `${toolName}: ${message}${code ? ` (${code})` : ""}`
+      );
     }
   });
 
@@ -1178,7 +1206,7 @@ async function main() {
         };
 
         const server = createServer();
-        await server.connect(transport);
+        await withTimeout("SSE server connection", server.connect(transport), 30000);
       } catch (error) {
         logger.error("❌ Failed to establish SSE session", "MCPServer", error);
         res.status(500).send("Failed to establish SSE session");

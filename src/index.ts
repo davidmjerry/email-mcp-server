@@ -66,6 +66,12 @@ const MCP_ALLOWED_HOSTS = process.env.MCP_ALLOWED_HOSTS
   : undefined;
 const MCP_TOKEN = process.env.MCP_TOKEN;
 
+// Server configuration constants
+const CONNECTION_RETRY_MAX_ATTEMPTS = 3;
+const CONNECTION_RETRY_BASE_DELAY_MS = 1000;
+const CONNECTION_RETRY_MAX_DELAY_MS = 10_000;
+const SSE_CONNECTION_TIMEOUT_MS = 30_000;
+
 // Validate required environment variables
 if (!USERNAME || !PASSWORD) {
   console.error("❌ Missing required environment variables: USERNAME and PASSWORD must be set");
@@ -224,7 +230,24 @@ const verifySmtpWithRetry = async (maxAttempts: number): Promise<boolean> => {
     } catch (error) {
       logger.warn(`SMTP verification attempt ${attempt} failed`, "MCPServer", error);
       if (attempt < maxAttempts) {
-        const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
+        const backoffMs = Math.min(CONNECTION_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), CONNECTION_RETRY_MAX_DELAY_MS);
+        const jitter = 0.5 + Math.random();
+        await sleep(Math.round(backoffMs * jitter));
+      }
+    }
+  }
+  return false;
+};
+
+const connectImapWithRetry = async (maxAttempts: number): Promise<boolean> => {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await imapService.connect();
+      return true;
+    } catch (error) {
+      logger.warn(`IMAP connection attempt ${attempt} failed`, "MCPServer", error);
+      if (attempt < maxAttempts) {
+        const backoffMs = Math.min(CONNECTION_RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1), CONNECTION_RETRY_MAX_DELAY_MS);
         const jitter = 0.5 + Math.random();
         await sleep(Math.round(backoffMs * jitter));
       }
@@ -387,12 +410,6 @@ const toolDefinitions = [
     description: "📁 Get all email folders with statistics",
     inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
-  {
-    name: "sync_folders",
-    description: "🔄 Synchronize folder structure from server",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
-  },
-
   // ⚡ EMAIL ACTIONS
   {
     name: "mark_email_read",
@@ -468,13 +485,8 @@ const toolDefinitions = [
 
   // 📊 ANALYTICS & STATISTICS TOOLS
   {
-    name: "get_email_stats",
-    description: "📊 Get comprehensive email statistics",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
-  },
-  {
     name: "get_email_analytics",
-    description: "📈 Get advanced email analytics and insights",
+    description: "📊 Get comprehensive email statistics and analytics including mailbox status",
     inputSchema: {
       type: "object",
       properties: {
@@ -508,41 +520,6 @@ const toolDefinitions = [
     }
   },
 
-  // 🔧 SYSTEM & MAINTENANCE TOOLS
-  {
-    name: "get_connection_status",
-    description: "🔌 Check SMTP and IMAP connection status",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
-  },
-  {
-    name: "sync_emails",
-    description: "🔄 Manually sync emails from server",
-    inputSchema: {
-      type: "object",
-      properties: {
-        folder: { type: "string", description: "Folder to sync (default: all)" },
-        full: { type: "boolean", description: "Full sync vs incremental", default: false }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "clear_cache",
-    description: "🧹 Clear email cache and analytics cache",
-    inputSchema: { type: "object", properties: {}, additionalProperties: false }
-  },
-  {
-    name: "get_logs",
-    description: "📋 Get recent system logs",
-    inputSchema: {
-      type: "object",
-      properties: {
-        level: { type: "string", enum: ["debug", "info", "warn", "error"], description: "Log level filter" },
-        limit: { type: "number", description: "Max log entries", default: 100 }
-      },
-      additionalProperties: false
-    }
-  }
 ];
 
 const getArguments = (value: unknown): Record<string, unknown> => {
@@ -573,6 +550,35 @@ const parseEmailIds = (args: Record<string, unknown>, toolName: string): number[
     return args.emailIds.map((value, index) => parseEmailIdValue(value, `emailIds[${index}]`, toolName));
   }
   throw new McpError(ErrorCode.InvalidParams, `${toolName} requires emailIds`);
+};
+
+/**
+ * Helper for batch email operations with partial failure handling.
+ * Runs operations in parallel, logs failures, and returns succeeded IDs with failure count.
+ */
+const runBatchEmailOperation = async <T extends Record<string, unknown>>(
+  emailIds: number[],
+  operation: (emailId: number) => Promise<unknown>,
+  toolName: string,
+  logContext: T,
+): Promise<{ succeeded: number[]; failedCount: number }> => {
+  const results = await Promise.allSettled(
+    emailIds.map(async (emailId) => {
+      await operation(emailId);
+      return emailId;
+    })
+  );
+  const succeeded = results
+    .filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled")
+    .map((r) => r.value);
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (failed.length > 0) {
+    logger.warn(`${toolName}: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
+      ...logContext,
+      errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
+    });
+  }
+  return { succeeded, failedCount: failed.length };
 };
 
 const notImplemented = (toolName: string) => {
@@ -730,46 +736,6 @@ const createServer = () => {
             content: [{ type: "text", text: `Test email sent to ${to}` }],
           };
         }
-        case "get_connection_status": {
-          assertNoUnknownKeys(args, [], "get_connection_status");
-          let smtpOk = true;
-          try {
-            await smtpService.verifyConnection();
-          } catch (error) {
-            logger.warn("SMTP connection check failed", "MCPServer", error);
-            smtpOk = false;
-          }
-          let imapOk = true;
-          try {
-            imapOk = await imapService.checkConnection("INBOX");
-          } catch (error) {
-            logger.warn("IMAP connection check failed", "MCPServer", error);
-            imapOk = false;
-          }
-
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  smtp: smtpOk,
-                  imap: imapOk,
-                }),
-              },
-            ],
-          };
-        }
-        case "get_email_stats": {
-          assertNoUnknownKeys(args, [], "get_email_stats");
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(analyticsService.getSnapshot()),
-              },
-            ],
-          };
-        }
         case "get_email_analytics": {
           assertNoUnknownKeys(args, ["folder"], "get_email_analytics");
           const snapshot = analyticsService.getSnapshot();
@@ -903,45 +869,22 @@ const createServer = () => {
             ],
           };
         }
-        case "sync_folders": {
-          assertNoUnknownKeys(args, [], "sync_folders");
-          const folders = await imapService.listFolders();
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  synced: true,
-                  folders,
-                }),
-              },
-            ],
-          };
-        }
         case "mark_email_read": {
           assertNoUnknownKeys(args, ["folder", "emailIds", "isRead"], "mark_email_read");
           const emailIds = parseEmailIds(args, "mark_email_read");
           const isRead = optionalBoolean(args, "isRead", "mark_email_read") ?? true;
-          const results = await Promise.allSettled(
-            emailIds.map(async (emailId) => {
-              await imapService.setEmailRead(folder, emailId, isRead);
-              return emailId;
-            })
+          const { succeeded, failedCount } = await runBatchEmailOperation(
+            emailIds,
+            (emailId) => imapService.setEmailRead(folder, emailId, isRead),
+            "mark_email_read",
+            { folder }
           );
-          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
-          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-          if (failed.length > 0) {
-            logger.warn(`mark_email_read: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
-              folder,
-              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
-            });
-          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds: succeeded, isRead, failedCount: failed.length }),
+                text: JSON.stringify({ emailIds: succeeded, isRead, failedCount }),
               },
             ],
           };
@@ -950,26 +893,18 @@ const createServer = () => {
           assertNoUnknownKeys(args, ["folder", "emailIds", "isStarred"], "star_email");
           const emailIds = parseEmailIds(args, "star_email");
           const isStarred = optionalBoolean(args, "isStarred", "star_email") ?? true;
-          const results = await Promise.allSettled(
-            emailIds.map(async (emailId) => {
-              await imapService.setEmailStarred(folder, emailId, isStarred);
-              return emailId;
-            })
+          const { succeeded, failedCount } = await runBatchEmailOperation(
+            emailIds,
+            (emailId) => imapService.setEmailStarred(folder, emailId, isStarred),
+            "star_email",
+            { folder }
           );
-          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
-          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-          if (failed.length > 0) {
-            logger.warn(`star_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
-              folder,
-              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
-            });
-          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds: succeeded, isStarred, failedCount: failed.length }),
+                text: JSON.stringify({ emailIds: succeeded, isStarred, failedCount }),
               },
             ],
           };
@@ -978,28 +913,19 @@ const createServer = () => {
           assertNoUnknownKeys(args, ["folder", "emailIds", "targetFolder"], "move_email");
           const targetFolder = requireString(args, "targetFolder", "move_email");
           const emailIds = parseEmailIds(args, "move_email");
-          const results = await Promise.allSettled(
-            emailIds.map(async (emailId) => {
-              await imapService.moveEmail(folder, emailId, targetFolder);
-              return emailId;
-            })
+          const { succeeded, failedCount } = await runBatchEmailOperation(
+            emailIds,
+            (emailId) => imapService.moveEmail(folder, emailId, targetFolder),
+            "move_email",
+            { folder, targetFolder }
           );
-          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
-          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-          if (failed.length > 0) {
-            logger.warn(`move_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
-              folder,
-              targetFolder,
-              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
-            });
-          }
           imapService.invalidateFolderCache(folder);
           imapService.invalidateFolderCache(targetFolder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds: succeeded, targetFolder, failedCount: failed.length }),
+                text: JSON.stringify({ emailIds: succeeded, targetFolder, failedCount }),
               },
             ],
           };
@@ -1007,26 +933,18 @@ const createServer = () => {
         case "delete_email": {
           assertNoUnknownKeys(args, ["folder", "emailIds"], "delete_email");
           const emailIds = parseEmailIds(args, "delete_email");
-          const results = await Promise.allSettled(
-            emailIds.map(async (emailId) => {
-              await imapService.deleteEmail(folder, emailId);
-              return emailId;
-            })
+          const { succeeded, failedCount } = await runBatchEmailOperation(
+            emailIds,
+            (emailId) => imapService.deleteEmail(folder, emailId),
+            "delete_email",
+            { folder }
           );
-          const succeeded = results.filter((r): r is PromiseFulfilledResult<number> => r.status === "fulfilled").map((r) => r.value);
-          const failed = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
-          if (failed.length > 0) {
-            logger.warn(`delete_email: ${failed.length}/${emailIds.length} operations failed`, "MCPServer", {
-              folder,
-              errors: failed.map((f) => f.reason?.message ?? String(f.reason)),
-            });
-          }
           imapService.invalidateFolderCache(folder);
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ emailIds: succeeded, deleted: true, failedCount: failed.length }),
+                text: JSON.stringify({ emailIds: succeeded, deleted: true, failedCount }),
               },
             ],
           };
@@ -1059,52 +977,6 @@ const createServer = () => {
               {
                 type: "text",
                 text: JSON.stringify(trends),
-              },
-            ],
-          };
-        }
-        case "sync_emails": {
-          assertNoUnknownKeys(args, ["folder", "full"], "sync_emails");
-          if (args.full !== undefined) {
-            optionalBoolean(args, "full", "sync_emails");
-          }
-          const status = await imapService.getMailboxStatus(folder);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  synced: true,
-                  status,
-                }),
-              },
-            ],
-          };
-        }
-        case "clear_cache": {
-          assertNoUnknownKeys(args, [], "clear_cache");
-          analyticsService.clear();
-          imapService.clearCache();
-          const clearedScheduled = smtpService.clearScheduledEmails();
-          return {
-            content: [{ type: "text", text: JSON.stringify({ analyticsCleared: true, imapCacheCleared: true, scheduledEmailsCleared: clearedScheduled }) }],
-          };
-        }
-        case "get_logs": {
-          assertNoUnknownKeys(args, ["level", "limit"], "get_logs");
-          const level = optionalString(args, "level", "get_logs") as "debug" | "info" | "warn" | "error" | undefined;
-          if (level && !["debug", "info", "warn", "error"].includes(level)) {
-            throw new McpError(ErrorCode.InvalidParams, "get_logs level must be one of debug, info, warn, error");
-          }
-          const limit = optionalNumber(args, "limit", "get_logs") ?? 100;
-          if (limit < 1 || limit > 500) {
-            throw new McpError(ErrorCode.InvalidParams, "get_logs limit must be between 1 and 500");
-          }
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(logger.getLogs(level, limit)),
               },
             ],
           };
@@ -1149,7 +1021,7 @@ async function main() {
   try {
     // Verify SMTP connection
     logger.info("🔗 Verifying SMTP connection...", "MCPServer");
-    const smtpReady = await verifySmtpWithRetry(3);
+    const smtpReady = await verifySmtpWithRetry(CONNECTION_RETRY_MAX_ATTEMPTS);
     if (smtpReady) {
       logger.info("✅ SMTP connection verified", "MCPServer");
     } else {
@@ -1157,13 +1029,13 @@ async function main() {
       logger.info("💡 Verify your SMTP host/port credentials and connectivity", "MCPServer");
     }
 
-    // Try to connect to IMAP
+    // Try to connect to IMAP with retry
     logger.info("🔗 Connecting to IMAP...", "MCPServer");
-    try {
-      await imapService.connect();
+    const imapReady = await connectImapWithRetry(CONNECTION_RETRY_MAX_ATTEMPTS);
+    if (imapReady) {
       logger.info("✅ IMAP connection established", "MCPServer");
-    } catch (imapError) {
-      logger.warn("⚠️ IMAP connection failed - email reading features will be limited", "MCPServer", imapError);
+    } else {
+      logger.warn("⚠️ IMAP connection failed - email reading features will be limited", "MCPServer");
       logger.info("💡 Verify your IMAP host/port credentials and connectivity", "MCPServer");
     }
 
@@ -1206,7 +1078,7 @@ async function main() {
         };
 
         const server = createServer();
-        await withTimeout("SSE server connection", server.connect(transport), 30000);
+        await withTimeout("SSE server connection", server.connect(transport), SSE_CONNECTION_TIMEOUT_MS);
       } catch (error) {
         logger.error("❌ Failed to establish SSE session", "MCPServer", error);
         res.status(500).send("Failed to establish SSE session");

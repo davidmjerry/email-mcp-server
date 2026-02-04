@@ -5,6 +5,7 @@ type LogLevel = LogEntry["level"];
 export class Logger {
   private debugEnabled = false;
   private entries: LogEntry[] = [];
+  private readonly maxEntries = 1000;
 
   setDebugMode(enabled: boolean) {
     this.debugEnabled = enabled;
@@ -45,6 +46,10 @@ export class Logger {
       details,
     };
     this.entries.push(entry);
+    // Trim buffer to prevent memory leak
+    if (this.entries.length > this.maxEntries) {
+      this.entries = this.entries.slice(-this.maxEntries);
+    }
 
     const prefix = `[${entry.timestamp}] [${scope}]`;
     const serializedDetails = details ? ` ${safeStringify(details)}` : "";

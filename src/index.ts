@@ -507,19 +507,6 @@ const toolDefinitions = [
       additionalProperties: false
     }
   },
-  {
-    name: "get_volume_trends",
-    description: "📉 Get email volume trends over time",
-    inputSchema: {
-      type: "object",
-      properties: {
-        folder: { type: "string", description: "Folder name (default: INBOX)", default: "INBOX" },
-        days: { type: "number", description: "Number of days to analyze", default: 30 }
-      },
-      additionalProperties: false
-    }
-  },
-
 ];
 
 const getArguments = (value: unknown): Record<string, unknown> => {
@@ -961,22 +948,6 @@ const createServer = () => {
               {
                 type: "text",
                 text: JSON.stringify(contacts),
-              },
-            ],
-          };
-        }
-        case "get_volume_trends": {
-          assertNoUnknownKeys(args, ["folder", "days"], "get_volume_trends");
-          const days = optionalNumber(args, "days", "get_volume_trends") ?? 30;
-          if (days < 1 || days > 365) {
-            throw new McpError(ErrorCode.InvalidParams, "get_volume_trends days must be between 1 and 365");
-          }
-          const trends = await imapService.getVolumeTrends(folder, days);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(trends),
               },
             ],
           };

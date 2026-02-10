@@ -183,8 +183,6 @@ sudo systemctl start email-mcp
 - `get_email_stats`
 - `get_email_analytics`
 - `get_contacts`
-- `get_volume_trends`
-
 ### System & Maintenance
 - `get_connection_status`
 - `sync_emails`

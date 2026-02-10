@@ -616,29 +616,6 @@ export class SimpleIMAPService {
       .slice(0, limit);
   }
 
-  async getVolumeTrends(folder: string, days: number): Promise<Array<{ date: string; count: number }>> {
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - Math.max(1, days) + 1);
-
-    const { emails } = await this.searchEmails(folder, {
-      dateFrom: cutoff,
-      limit: 1000,
-    });
-
-    const buckets = new Map<string, number>();
-    for (const email of emails) {
-      if (!email.date) {
-        continue;
-      }
-      const day = email.date.slice(0, 10);
-      buckets.set(day, (buckets.get(day) ?? 0) + 1);
-    }
-
-    return Array.from(buckets.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, count]) => ({ date, count }));
-  }
-
   clearCache(): void {
     this.folderCache = null;
     this.mailboxStatusCache.clear();

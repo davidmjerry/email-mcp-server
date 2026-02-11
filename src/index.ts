@@ -327,19 +327,6 @@ const toolDefinitions = [
       additionalProperties: false
     }
   },
-  {
-    name: "send_test_email",
-    description: "🧪 Send a test email to verify SMTP functionality",
-    inputSchema: {
-      type: "object",
-      properties: {
-        to: { type: "string", description: "Test recipient email address" },
-        customMessage: { type: "string", description: "Custom test message" }
-      },
-      required: ["to"],
-      additionalProperties: false
-    }
-  },
 
   // 📬 EMAIL READING TOOLS
   {
@@ -491,18 +478,6 @@ const toolDefinitions = [
       type: "object",
       properties: {
         folder: { type: "string", description: "Folder name (default: INBOX)", default: "INBOX" }
-      },
-      additionalProperties: false
-    }
-  },
-  {
-    name: "get_contacts",
-    description: "👥 Get contact information with interaction statistics",
-    inputSchema: {
-      type: "object",
-      properties: {
-        folder: { type: "string", description: "Folder name (default: INBOX)", default: "INBOX" },
-        limit: { type: "number", description: "Max contacts to return", default: 100 }
       },
       additionalProperties: false
     }
@@ -708,19 +683,6 @@ const createServer = () => {
 
           return {
             content: [{ type: "text", text: `Email sent to ${recipients.join(", ")}` }],
-          };
-        }
-        case "send_test_email": {
-          assertNoUnknownKeys(args, ["to", "customMessage"], "send_test_email");
-          const to = requireString(args, "to", "send_test_email");
-          if (!isValidEmail(to)) {
-            throw new McpError(ErrorCode.InvalidParams, "send_test_email requires a valid to email address");
-          }
-          const message = optionalString(args, "customMessage", "send_test_email");
-          await smtpService.sendTestEmail(to, message);
-          analyticsService.recordSentEmail();
-          return {
-            content: [{ type: "text", text: `Test email sent to ${to}` }],
           };
         }
         case "get_email_analytics": {
@@ -932,22 +894,6 @@ const createServer = () => {
               {
                 type: "text",
                 text: JSON.stringify({ emailIds: succeeded, deleted: true, failedCount }),
-              },
-            ],
-          };
-        }
-        case "get_contacts": {
-          assertNoUnknownKeys(args, ["folder", "limit"], "get_contacts");
-          const limit = optionalNumber(args, "limit", "get_contacts") ?? 100;
-          if (limit < 1 || limit > 500) {
-            throw new McpError(ErrorCode.InvalidParams, "get_contacts limit must be between 1 and 500");
-          }
-          const contacts = await imapService.getContacts(folder, limit);
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(contacts),
               },
             ],
           };

@@ -159,7 +159,6 @@ sudo systemctl start email-mcp
 
 ### Email Sending
 - `send_email`
-- `send_test_email`
 
 ### Email Reading
 - `get_emails`
@@ -182,7 +181,7 @@ sudo systemctl start email-mcp
 ### Analytics & Statistics
 - `get_email_stats`
 - `get_email_analytics`
-- `get_contacts`
+
 ### System & Maintenance
 - `get_connection_status`
 - `sync_emails`

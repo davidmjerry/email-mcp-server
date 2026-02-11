@@ -590,32 +590,6 @@ export class SimpleIMAPService {
     });
   }
 
-  async getContacts(folder: string, limit: number): Promise<Array<{ address?: string; name?: string; count: number }>> {
-    const { emails } = await this.getEmails(folder, Math.max(limit, 200), 0);
-    const counts = new Map<string, { address?: string; name?: string; count: number }>();
-
-    for (const email of emails) {
-      const from = email.from ?? [];
-      for (const contact of from) {
-        const key = contact.address ?? contact.name ?? "unknown";
-        const existing = counts.get(key);
-        if (existing) {
-          existing.count += 1;
-        } else {
-          counts.set(key, {
-            address: contact.address,
-            name: contact.name,
-            count: 1,
-          });
-        }
-      }
-    }
-
-    return Array.from(counts.values())
-      .sort((a, b) => b.count - a.count)
-      .slice(0, limit);
-  }
-
   clearCache(): void {
     this.folderCache = null;
     this.mailboxStatusCache.clear();

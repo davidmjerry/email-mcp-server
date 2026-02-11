@@ -106,14 +106,6 @@ export class SMTPService {
     logger.info("✅ Email sent", "SMTPService", { to, subject: options.subject });
   }
 
-  async sendTestEmail(to: string, message?: string): Promise<void> {
-    await this.sendEmail({
-      to,
-      subject: "MCP Test Email",
-      body: message ?? "Your SMTP configuration is working!",
-    });
-  }
-
   scheduleEmail(options: SendEmailOptions, scheduleAt: Date): { jobId: string; scheduledAt: string } {
     const delayMs = Math.max(0, scheduleAt.getTime() - Date.now());
     const jobId = `job_${Math.random().toString(36).slice(2, 10)}`;
